@@ -213,6 +213,41 @@ Resources:
                 - Effect: Allow
                   Action: sqs:SendMessage
                   Resource: !GetAtt FootballScoreQueue.Arn
+  PerformanceDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub "${AWS::StackName}-Performance-${Environment}"
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  [ "AWS/ApiGateway", "Count", "ApiName", "${AWS::StackName}-FootballScoresApi-${Environment}", "Stage", "dev", { "id": "m1", "label": "API Incoming requests (Total)" } ],
+                  [ "AWS/SQS", "ApproximateNumberOfMessagesVisible", "QueueName", "${FootballScoreQueue.QueueName}", { "color": "#ff7f0e", "stat": "Maximum" } ]
+                ],
+                "period": 60,
+                "region": "${AWS::Region}",
+                "title": "Incoming Traffic vs SQS Backlog",
+                "view": "timeSeries"
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  [ "AWS/Lambda", "ConcurrentExecutions", "FunctionName", "${KafkaForwarderFunction}", { "stat": "Maximum" } ],
+                  [ "AWS/Lambda", "Invocations", "FunctionName", "${KafkaForwarderFunction}", { "stat": "Sum" } ]
+                ],
+                "period": 60,
+                "region": "${AWS::Region}",
+                "title": "Lambda Scaling & Processing",
+                "view": "timeSeries"
+              }
+            }
+          ]
+        }
 
 #Outputs:
 #  FootballScoresProducerApi:
