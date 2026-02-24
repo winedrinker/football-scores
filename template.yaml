@@ -1,0 +1,226 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Football Scores E2E - High Performance Pipeline
+
+Parameters:
+  Environment:
+    Type: String
+    Description: Deployment environment (e.g., dev, staging, prod)
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Default: dev
+
+Globals:
+  Function:
+    Timeout: 5
+    Runtime: python3.14
+    Architectures:
+      - x86_64
+    Tracing: Active
+    LoggingConfig:
+      LogFormat: JSON
+  Api:
+    TracingEnabled: false
+Resources:
+  # --- INFRASTRUCTURE (SQS) ---
+  FootballScoreQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${AWS::StackName}-FootballScores-${Environment}"
+      VisibilityTimeout: 30
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt FootballScoreDLQ.Arn
+        maxReceiveCount: 3
+  FootballScoreDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${AWS::StackName}-FootballScores-DLQ-${Environment}"
+  FootballScoreQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref FootballScoreQueue
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !GetAtt ApiGatewaySqsRole.Arn
+            Action: sqs:SendMessage
+            Resource: !GetAtt FootballScoreQueue.Arn
+
+  # --- SHARED LAYER ---
+  CommonLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: !Sub "${AWS::StackName}-common-layer"
+      CompatibleRuntimes:
+        - python3.14
+      ContentUri: src/layer/
+      RetentionPolicy: Delete
+    Metadata:
+      BuildMethod: python3.14
+
+  # --- PRODUCER (API -> SQS) ---
+#  FootballScoresProducerFunction:
+#    Type: AWS::Serverless::Function
+#    Properties:
+#      Handler: app.lambda_handler
+#      CodeUri: src/producer/
+#      Description: Football Scores Producer
+#      MemorySize: 128
+#      Layers:
+#        - !Ref CommonLayer
+#      Environment:
+#        Variables:
+#          LOG_LEVEL: INFO
+#          SQS_QUEUE_URL: !Ref FootballScoreQueue
+#      Tags:
+#        LambdaPowertools: python
+#      Policies:
+#        - SQSSendMessagePolicy:
+#            QueueName: !GetAtt FootballScoreQueue.QueueName
+#      Events:
+#        PostScoreApi:
+#          Type: Api
+#          Properties:
+#            Path: /scores
+#            Method: post
+#
+#  FootballScoresProducerLogsLogGroup:
+#    Type: AWS::Logs::LogGroup
+#    Properties:
+#      LogGroupName: !Sub "/aws/lambda/${FootballScoresProducerFunction}"
+#      RetentionInDays: 30
+
+  KafkaForwarderFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/forwarder/
+      Handler: app.lambda_handler
+      MemorySize: 512
+      Layers:
+        - !Ref CommonLayer
+      Environment:
+        Variables:
+          CONFLUENT_SECRET_ARN: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:ConfluentCloudAuth"
+      Policies:
+        - SQSPollerPolicy:
+            QueueName: !GetAtt FootballScoreQueue.QueueName
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:ConfluentCloudAuth-*"
+      Events:
+        SQSTrigger:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt FootballScoreQueue.Arn
+            BatchSize: 10
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+            MaximumBatchingWindowInSeconds: 1
+            ScalingConfig:
+              MaximumConcurrency: 5
+  FootballScoresApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: !Ref Environment
+      Name: !Sub "${AWS::StackName}-FootballScoresApi-${Environment}"
+      Description: API for Football Scores Producer
+      EndpointConfiguration: REGIONAL
+      Cors:
+        AllowMethods: "'POST'"
+        AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+        AllowOrigin: "'*'"
+      DefinitionBody:
+        openapi: "3.0.1"
+        info:
+          title: Football Scores API
+          version: "1.0"
+        paths:
+          /scores:
+            post:
+              requestBody:
+                content:
+                  application/json:
+                    schema:
+                      $ref: "#/components/schemas/ScoreModel"
+                required: true
+              responses:
+                "202":
+                  description: "202 response"
+                  content: { }
+              x-amazon-apigateway-request-validator: "Validate body"
+              x-amazon-apigateway-integration:
+                type: "aws"
+                credentials: !GetAtt ApiGatewaySqsRole.Arn
+                uri: !Sub "arn:aws:apigateway:${AWS::Region}:sqs:path/${AWS::AccountId}/${FootballScoreQueue.QueueName}"
+                httpMethod: "POST"
+                responses:
+                  default:
+                    statusCode: "202"
+                requestParameters:
+                  integration.request.header.Content-Type: "'application/x-www-form-urlencoded'"
+                requestTemplates:
+                  application/json: "Action=SendMessage&MessageBody=$util.urlEncode($input.body)&Version=2012-11-05"
+                passthroughBehavior: "when_no_templates"
+        components:
+          schemas:
+            ScoreModel:
+              title: "ScoreUpdate"
+              required:
+                - "matchId"
+                - "score"
+                - "teamAway"
+                - "teamHome"
+                - "timestamp"
+              type: "object"
+              properties:
+                matchId:
+                  type: "integer"
+                teamHome:
+                  type: "string"
+                teamAway:
+                  type: "string"
+                score:
+                  pattern: "^\\d+:\\d+$"
+                  type: "string"
+                timestamp:
+                  type: "string"
+                  format: "date-time"
+        x-amazon-apigateway-security-policy: "TLS_1_0"
+        x-amazon-apigateway-request-validators:
+          Validate body:
+            validateRequestParameters: false
+            validateRequestBody: true
+  ApiGatewaySqsRole:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: apigateway.amazonaws.com
+              Action: sts:AssumeRole
+        Policies:
+          - PolicyName: ApiSqsPolicy
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action: sqs:SendMessage
+                  Resource: !GetAtt FootballScoreQueue.Arn
+
+#Outputs:
+#  FootballScoresProducerApi:
+#    Description: API Gateway endpoint URL for Prod environment for Hello World
+#      Function
+#    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/Prod/hello"
+#
+#  HelloWorldFunction:
+#    Description: Hello World Lambda Function ARN
+#    Value: !GetAtt HelloWorldFunction.Arn
+
