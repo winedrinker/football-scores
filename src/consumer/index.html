@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="hu">
+<head>
+    <meta charset="UTF-8">
+    <title>Foci Live Stream</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #1a1a1a; color: white; margin: 0; padding: 20px; }
+        .container { max-width: 800px; margin: 0 auto; }
+        h1 { text-align: center; color: #4CAF50; }
+        #status { text-align: center; margin-bottom: 20px; font-size: 0.9em; }
+        #events { display: flex; flex-direction: column; gap: 10px; }
+
+        /* Esemény kártyák stílusa */
+        .event-card {
+            background: #2a2a2a; border-radius: 8px; padding: 15px;
+            border-left: 6px solid #888; transition: all 0.3s ease;
+            animation: slideIn 0.3s ease-out;
+        }
+
+        /* Típusfüggő színek */
+        .GOAL { border-left-color: #ffeb3b; background: #332b00; }
+        .YELLOW_CARD { border-left-color: #ffd600; }
+        .RED_CARD { border-left-color: #f44336; background: #330000; }
+        .CORNER { border-left-color: #2196F3; }
+
+        .event-header { display: flex; justify-content: space-between; align-items: center; }
+        .match-name { font-weight: bold; font-size: 1.1em; }
+        .score { font-size: 1.2em; color: #ffeb3b; }
+        .time { color: #888; font-size: 0.8em; }
+
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateX(-20px); }
+            to { opacity: 1; transform: translateX(0); }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>⚽ Élő Események</h1>
+        <div id="status">Kapcsolódás...</div>
+        <div id="events">
+            </div>
+    </div>
+
+    <script>
+        // Csatlakozás a FastAPI WebSockethez
+        const ws = new WebSocket('ws://localhost:8000/ws');
+        const eventsDiv = document.getElementById('events');
+        const statusDiv = document.getElementById('status');
+
+        ws.onopen = () => {
+            statusDiv.innerText = "● Online - Várakozás adatokra...";
+            statusDiv.style.color = "#4CAF50";
+        };
+
+        ws.onclose = () => {
+            statusDiv.innerText = "○ Megszakadt a kapcsolat";
+            statusDiv.style.color = "#f44336";
+        };
+
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+
+            // Új kártya létrehozása
+            const card = document.createElement('div');
+            const type = data.eventType || 'INFO';
+            card.className = `event-card ${type}`;
+
+            const timestamp = new Date().toLocaleTimeString('hu-HU');
+
+            card.innerHTML = `
+                <div class="event-header">
+                    <span class="match-name">${data.teamHome} - ${data.teamAway}</span>
+                    <span class="score">${data.score || ''}</span>
+                </div>
+                <div style="margin-top: 5px;">
+                    <strong>${translateType(type)}</strong> ${data.player ? '- ' + data.player : ''}
+                </div>
+                <div class="time">${timestamp}</div>
+            `;
+
+            // Betesszük a lista elejére
+            eventsDiv.prepend(card);
+        };
+
+        function translateType(type) {
+            const types = {
+                'GOAL': '⚽ GÓÓÓL!',
+                'YELLOW_CARD': '🟨 Sárga lap',
+                'RED_CARD': '🟥 Piros lap',
+                'CORNER': '🚩 Szöglet',
+                'FOUL': '❗ Szabálytalanság'
+            };
+            return types[type] || '📢 Esemény';
+        }
+    </script>
+</body>
+</html>
