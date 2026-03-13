@@ -14,20 +14,11 @@ def handle_api_errors(func):
             return func(*args, **kwargs)
         except ValidationError as e:
             logger.warning(f"Validation failed: {e}")
-            return Response(
-                status_code=400,
-                body={"error": "Invalid input", "details": e.errors()}
-            )
-        except ClientError as e:
-            logger.exception("Infrastructure (AWS) error")
-            return Response(
-                status_code=500,
-                body={"error": "Downstream service error"}
-            )
+            return Response(status_code=400, body={"error": "Invalid input"})
+        except ClientError:
+            logger.exception("AWS service error")
+            return Response(status_code=503, body={"error": "Service unavailable"})
         except Exception:
-            logger.exception("Unexpected system error")
-            return Response(
-                status_code=500,
-                body={"error": "Internal server error"}
-            )
+            logger.exception("Unexpected error")
+            return Response(status_code=500, body={"error": "Internal error"})
     return wrapper

@@ -30,10 +30,12 @@ Resources:
     Type: AWS::SQS::Queue
     Properties:
       QueueName: !Sub "${AWS::StackName}-FootballScores-${Environment}"
-      VisibilityTimeout: 30
+      VisibilityTimeout: 60
+      ReceiveMessageWaitTimeSeconds: 10
+      MessageRetentionPeriod: 345600
       RedrivePolicy:
         deadLetterTargetArn: !GetAtt FootballScoreDLQ.Arn
-        maxReceiveCount: 3
+        maxReceiveCount: 2
   FootballScoreDLQ:
     Type: AWS::SQS::Queue
     Properties:
@@ -101,12 +103,15 @@ Resources:
     Properties:
       CodeUri: src/forwarder/
       Handler: app.lambda_handler
-      MemorySize: 512
+      MemorySize: 1024
+      Timeout: 10
       Layers:
         - !Ref CommonLayer
       Environment:
         Variables:
           CONFLUENT_SECRET_ARN: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:ConfluentCloudAuth"
+          POWERTOOLS_SERVICE_NAME: football-forwarder
+          POWERTOOLS_METRICS_NAMESPACE: FootballProject
       Policies:
         - SQSPollerPolicy:
             QueueName: !GetAtt FootballScoreQueue.QueueName
@@ -117,10 +122,10 @@ Resources:
           Type: SQS
           Properties:
             Queue: !GetAtt FootballScoreQueue.Arn
-            BatchSize: 10
+            BatchSize: 500
             FunctionResponseTypes:
               - ReportBatchItemFailures
-            MaximumBatchingWindowInSeconds: 1
+            MaximumBatchingWindowInSeconds: 2
             ScalingConfig:
               MaximumConcurrency: 5
   FootballScoresApi:
@@ -224,30 +229,102 @@ Resources:
               "type": "metric",
               "properties": {
                 "metrics": [
-                  [ "AWS/ApiGateway", "Count", "ApiName", "${AWS::StackName}-FootballScoresApi-${Environment}", "Stage", "dev", { "id": "m1", "label": "API Incoming requests (Total)" } ],
-                  [ "AWS/SQS", "ApproximateNumberOfMessagesVisible", "QueueName", "${FootballScoreQueue.QueueName}", { "color": "#ff7f0e", "stat": "Maximum" } ]
+                  [ "AWS/ApiGateway", "Count", "ApiName", "${AWS::StackName}-FootballScoresApi-${Environment}", "Stage", "${Environment}", { "stat": "Sum", "label": "API Requests" } ],
+                  [ ".", "Latency", ".", ".", ".", ".", { "stat": "Average", "yAxis": "right" } ]
                 ],
                 "period": 60,
                 "region": "${AWS::Region}",
-                "title": "Incoming Traffic vs SQS Backlog",
-                "view": "timeSeries"
+                "title": "API Performance",
+                "yAxis": { "left": { "label": "Count" }, "right": { "label": "ms" } }
               }
             },
             {
               "type": "metric",
               "properties": {
                 "metrics": [
-                  [ "AWS/Lambda", "ConcurrentExecutions", "FunctionName", "${KafkaForwarderFunction}", { "stat": "Maximum" } ],
-                  [ "AWS/Lambda", "Invocations", "FunctionName", "${KafkaForwarderFunction}", { "stat": "Sum" } ]
+                  [ "AWS/SQS", "ApproximateNumberOfMessagesVisible", "QueueName", "${FootballScoreQueue.QueueName}", { "stat": "Maximum" } ],
+                  [ ".", "NumberOfMessagesSent", ".", ".", { "stat": "Sum" } ],
+                  [ ".", "NumberOfMessagesDeleted", ".", ".", { "stat": "Sum" } ]
                 ],
                 "period": 60,
                 "region": "${AWS::Region}",
-                "title": "Lambda Scaling & Processing",
-                "view": "timeSeries"
+                "title": "SQS Throughput"
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  [ "FootballProject", "MessagesProcessed", "service", "football-forwarder", { "stat": "Sum" } ],
+                  [ ".", "BatchSize", ".", ".", { "stat": "Average" } ]
+                ],
+                "period": 60,
+                "region": "${AWS::Region}",
+                "title": "Kafka Forwarder Metrics"
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  [ "AWS/Lambda", "Duration", "FunctionName", "${KafkaForwarderFunction}", { "stat": "Average" } ],
+                  [ "...", { "stat": "p99" } ],
+                  [ ".", "Errors", ".", ".", { "stat": "Sum", "yAxis": "right" } ],
+                  [ ".", "Throttles", ".", ".", { "stat": "Sum", "yAxis": "right" } ]
+                ],
+                "period": 60,
+                "region": "${AWS::Region}",
+                "title": "Lambda Performance",
+                "yAxis": { "left": { "label": "ms" }, "right": { "label": "Count" } }
               }
             }
           ]
         }
+
+  HighLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-HighLatency-${Environment}"
+      MetricName: Latency
+      Namespace: AWS/ApiGateway
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 100
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: ApiName
+          Value: !Sub "${AWS::StackName}-FootballScoresApi-${Environment}"
+
+  QueueBacklogAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-QueueBacklog-${Environment}"
+      MetricName: ApproximateNumberOfMessagesVisible
+      Namespace: AWS/SQS
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 10000
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt FootballScoreQueue.QueueName
+
+  LambdaErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-LambdaErrors-${Environment}"
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref KafkaForwarderFunction
 
 #Outputs:
 #  FootballScoresProducerApi:

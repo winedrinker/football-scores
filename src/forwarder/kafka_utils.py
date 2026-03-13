@@ -19,16 +19,24 @@ class KafkaForwarderContext:
     @property
     def get_producer(self) -> Producer:
         if self._producer is None:
-            logger.info("Initializing/Reconnecting Kafka Producer...")
-            secrets = parameters.get_secret(os.environ['CONFLUENT_SECRET_ARN'], transform='json')
+            logger.info("Initializing Kafka Producer")
+            secrets = parameters.get_secret(os.environ['CONFLUENT_SECRET_ARN'], transform='json', max_age=300)
             self._producer = Producer({
                 'bootstrap.servers': secrets['bootstrap.servers'],
                 'sasl.username': secrets['sasl.username'],
                 'sasl.password': secrets['sasl.password'],
                 'security.protocol': 'SASL_SSL',
                 'sasl.mechanisms': 'PLAIN',
-                'socket.timeout.ms': 5000,
-                'linger.ms': 5,
+                'socket.keepalive.enable': True,
+                'socket.timeout.ms': 3000,
+                'request.timeout.ms': 5000,
+                'linger.ms': 50,
+                'batch.size': 32768,
+                'batch.num.messages': 1000,
+                'compression.type': 'lz4',
+                'acks': 1,
+                'retries': 2,
+                'queue.buffering.max.messages': 100000
             })
         return self._producer
 
@@ -46,24 +54,25 @@ class KafkaForwarderContext:
     def _delivery_callback(self, match_id):
         def report(err, msg):
             if err:
-                logger.error(f"Kafka error for {match_id}: {err}")
-                self._delivery_errors.add(err)
-
+                logger.error(f"Kafka delivery failed", extra={"match_id": match_id, "error": str(err)})
+                self._delivery_errors.append(str(match_id))
         return report
 
     @tracer.capture_method
     def finalize(self):
-        try:
-            if self._producer:
-                self._producer.flush(timeout=5)
-            if self._delivery_errors:
-                err_count = len(self._delivery_errors)
-                self._delivery_errors.clear()
-                raise Exception(f"Batch failed with {err_count} async errors")
-        except Exception as e:
-            logger.warning(f"Resetting producer due to error: {e}")
+        if not self._producer:
+            return
+        
+        pending = self._producer.flush(timeout=3)
+        if pending > 0:
+            logger.warning(f"{pending} messages not delivered")
+        
+        if self._delivery_errors:
+            failed_ids = self._delivery_errors[:10]
+            err_count = len(self._delivery_errors)
+            self._delivery_errors.clear()
             self._producer = None
-            raise e
+            raise Exception(f"{err_count} delivery failures: {failed_ids}")
 
 @tracer.capture_method()
 def get_kafka_context() -> KafkaForwarderContext:

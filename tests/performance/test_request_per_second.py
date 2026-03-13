@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 import requests
 
 
-URL = "https://bc5bfjiyu0.execute-api.eu-west-1.amazonaws.com/dev/scores"
+URL = "https://uz8ge9hus9.execute-api.eu-west-1.amazonaws.com/dev/scores"
 TOTAL = 2500
 CONCURRENCY = 100
 
